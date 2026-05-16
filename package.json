@@ -1,0 +1,14 @@
+{
+  "name": "remorahq-alert-state-plugins",
+  "version": "0.1.0",
+  "description": "RemoraHQ Alert State MeshCentral plugin",
+  "main": "remoraAlertState.js",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lockbb1/RemoraHQ-Alert-State-Plugins.git"
+  },
+  "engines": {
+    "meshcentral": ">=1.1.56"
+  }
+}

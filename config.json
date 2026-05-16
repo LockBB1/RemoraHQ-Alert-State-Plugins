@@ -1,0 +1,17 @@
+{
+  "name": "RemoraHQ - Alert State",
+  "shortName": "remoraAlertState",
+  "version": "0.1.0",
+  "description": "Server-side persistence for RemoraHQ alert overlays (acknowledge / resolve / snooze) + shared bookmarks. State is broadcast to all connected admins on every mutation.",
+  "hasAdminPanel": false,
+  "homepage": "https://github.com/lockbb1/RemoraHQ-Alert-State-Plugins",
+  "changelogUrl": "https://github.com/lockbb1/RemoraHQ-Alert-State-Plugins/releases",
+  "configUrl": "https://raw.githubusercontent.com/lockbb1/RemoraHQ-Alert-State-Plugins/main/config.json",
+  "downloadUrl": "https://github.com/lockbb1/RemoraHQ-Alert-State-Plugins/archive/refs/heads/main.zip",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lockbb1/RemoraHQ-Alert-State-Plugins.git"
+  },
+  "meshCentralCompat": ">=1.1.56",
+  "versionHistoryUrl": "https://api.github.com/repos/lockbb1/RemoraHQ-Alert-State-Plugins/tags"
+}
