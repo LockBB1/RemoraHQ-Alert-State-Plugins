@@ -23,12 +23,18 @@
  *
  * Actions:
  *   list          → { state: AlertStateMap, bookmarks: string[] }
- *   acknowledge   ← { id, by?, note? }
- *   resolve       ← { id, by?, note? }
- *   snooze        ← { id, durationMinutes, by? }
+ *   acknowledge   ← { id, note? }
+ *   resolve       ← { id, note? }
+ *   snooze        ← { id, durationMinutes }
  *   unacknowledge ← { id }
  *   bookmark      ← { id }
  *   unbookmark    ← { id }
+ *
+ * v0.2.0 (AUDIT-5 #35): every mutation requires an authenticated session user;
+ * timeline attribution (`by`) is pinned to that server-side identity, never a
+ * client field (was spoofable). `id`/`note` are length-bounded and the record
+ * / timeline / bookmark counts are capped so the shared, broadcast state file
+ * cannot be grown without bound.
  */
 
 'use strict';
@@ -37,7 +43,13 @@ var path = require('path');
 var fs = require('fs');
 
 var PLUGIN_SHORT_NAME = 'remoraAlertState';
-var PLUGIN_VERSION = '0.1.0';
+var PLUGIN_VERSION = '0.2.0';
+// v0.2.0 (AUDIT-5 #35) — bounds against unbounded growth of the shared,
+// broadcast-to-all-admins state file.
+var ALERT_ID_MAX_LEN = 256;
+var ALERT_NOTE_MAX_LEN = 512;
+var ALERT_RECORDS_MAX = 5000;
+var ALERT_TIMELINE_MAX = 100;
 
 module.exports.remoraAlertState = function (parent) {
     var obj = {};
@@ -116,16 +128,26 @@ module.exports.remoraAlertState = function (parent) {
         }
     }
 
+    // Returns the record, or null when a NEW record would exceed the cap (so a
+    // caller cannot grow stateMap without bound). Existing records always resolve.
     function ensureRecord(id) {
-        if (!stateMap[id]) stateMap[id] = { status: 'active', timeline: [] };
+        if (!stateMap[id]) {
+            if (Object.keys(stateMap).length >= ALERT_RECORDS_MAX) return null;
+            stateMap[id] = { status: 'active', timeline: [] };
+        }
         if (!Array.isArray(stateMap[id].timeline)) stateMap[id].timeline = [];
         return stateMap[id];
     }
 
-    function timelineEntry(kind, by, note) {
+    // Append a timeline entry, capping per-record history at ALERT_TIMELINE_MAX.
+    function pushTimeline(rec, kind, by, note) {
         var entry = { kind: String(kind), at: new Date().toISOString() };
         if (by) entry.by = String(by);
-        if (note) entry.note = String(note);
+        if (note) entry.note = String(note).slice(0, ALERT_NOTE_MAX_LEN);
+        rec.timeline.push(entry);
+        if (rec.timeline.length > ALERT_TIMELINE_MAX) {
+            rec.timeline = rec.timeline.slice(-ALERT_TIMELINE_MAX);
+        }
         return entry;
     }
 
@@ -169,7 +191,12 @@ module.exports.remoraAlertState = function (parent) {
 
         var action = String(command.pluginaction || '');
         var id = (command.id != null) ? String(command.id) : null;
-        var by = (command.by != null) ? String(command.by) : (command.userid ? String(command.userid) : null);
+        // v0.2.0 (AUDIT-5 #35). Attribution is pinned to the server-authenticated
+        // session user — NEVER the client `by`/`userid`, which could be set to
+        // any other user's id. `list` is a read; every mutation requires an
+        // authenticated actor and a bounded id.
+        var actor = session && session.user;
+        var by = (actor && actor._id) ? String(actor._id) : null;
 
         try {
             switch (action) {
@@ -179,10 +206,13 @@ module.exports.remoraAlertState = function (parent) {
                 }
                 case 'acknowledge': {
                     if (!id) return replyError(session, command, 'missing_id');
+                    if (id.length > ALERT_ID_MAX_LEN) return replyError(session, command, 'invalid_id');
+                    if (!by) return replyError(session, command, 'auth_required');
                     var rec = ensureRecord(id);
+                    if (!rec) return replyError(session, command, 'capacity_exceeded');
                     rec.status = 'acknowledged';
                     delete rec.snoozedUntil;
-                    rec.timeline.push(timelineEntry('acknowledged', by, command.note));
+                    pushTimeline(rec, 'acknowledged', by, command.note);
                     persist();
                     broadcast();
                     reply(session, command, { record: rec });
@@ -190,10 +220,13 @@ module.exports.remoraAlertState = function (parent) {
                 }
                 case 'resolve': {
                     if (!id) return replyError(session, command, 'missing_id');
+                    if (id.length > ALERT_ID_MAX_LEN) return replyError(session, command, 'invalid_id');
+                    if (!by) return replyError(session, command, 'auth_required');
                     var rec2 = ensureRecord(id);
+                    if (!rec2) return replyError(session, command, 'capacity_exceeded');
                     rec2.status = 'resolved';
                     delete rec2.snoozedUntil;
-                    rec2.timeline.push(timelineEntry('resolved', by, command.note));
+                    pushTimeline(rec2, 'resolved', by, command.note);
                     persist();
                     broadcast();
                     reply(session, command, { record: rec2 });
@@ -201,12 +234,15 @@ module.exports.remoraAlertState = function (parent) {
                 }
                 case 'snooze': {
                     if (!id) return replyError(session, command, 'missing_id');
+                    if (id.length > ALERT_ID_MAX_LEN) return replyError(session, command, 'invalid_id');
+                    if (!by) return replyError(session, command, 'auth_required');
                     var minutes = Number(command.durationMinutes);
                     if (!isFinite(minutes) || minutes <= 0) return replyError(session, command, 'invalid_duration');
                     var rec3 = ensureRecord(id);
+                    if (!rec3) return replyError(session, command, 'capacity_exceeded');
                     rec3.status = 'snoozed';
                     rec3.snoozedUntil = new Date(Date.now() + minutes * 60000).toISOString();
-                    rec3.timeline.push(timelineEntry('snoozed:' + minutes + 'm', by));
+                    pushTimeline(rec3, 'snoozed:' + minutes + 'm', by);
                     persist();
                     broadcast();
                     reply(session, command, { record: rec3 });
@@ -214,10 +250,13 @@ module.exports.remoraAlertState = function (parent) {
                 }
                 case 'unacknowledge': {
                     if (!id) return replyError(session, command, 'missing_id');
+                    if (id.length > ALERT_ID_MAX_LEN) return replyError(session, command, 'invalid_id');
+                    if (!by) return replyError(session, command, 'auth_required');
                     if (stateMap[id]) {
                         stateMap[id].status = 'active';
                         delete stateMap[id].snoozedUntil;
-                        stateMap[id].timeline.push(timelineEntry('reopened', by));
+                        if (!Array.isArray(stateMap[id].timeline)) stateMap[id].timeline = [];
+                        pushTimeline(stateMap[id], 'reopened', by);
                         persist();
                         broadcast();
                     }
@@ -226,7 +265,10 @@ module.exports.remoraAlertState = function (parent) {
                 }
                 case 'bookmark': {
                     if (!id) return replyError(session, command, 'missing_id');
+                    if (id.length > ALERT_ID_MAX_LEN) return replyError(session, command, 'invalid_id');
+                    if (!by) return replyError(session, command, 'auth_required');
                     if (bookmarks.indexOf(id) === -1) {
+                        if (bookmarks.length >= ALERT_RECORDS_MAX) return replyError(session, command, 'capacity_exceeded');
                         bookmarks.push(id);
                         persist();
                         broadcast();
@@ -236,6 +278,8 @@ module.exports.remoraAlertState = function (parent) {
                 }
                 case 'unbookmark': {
                     if (!id) return replyError(session, command, 'missing_id');
+                    if (id.length > ALERT_ID_MAX_LEN) return replyError(session, command, 'invalid_id');
+                    if (!by) return replyError(session, command, 'auth_required');
                     var ix = bookmarks.indexOf(id);
                     if (ix !== -1) {
                         bookmarks.splice(ix, 1);
